@@ -39,7 +39,10 @@ internal interface MetadataExtractor {
         fun from(context: Context): MetadataExtractor =
             MetadataExtractorImpl(context.contentResolver)
 
-        /** Cover size limit when many files are extracted in parallel. */
+        /**
+         * Cover size limit when many files are extracted in parallel. Playback has a similar
+         * limit for whole ID3 tags (MAX_PEEKED_ID3_TAG_BYTES in media's BundledExtractorsAdapter).
+         */
         const val DEFAULT_MAX_COVER_BYTES = 16 * 1024 * 1024
 
         /** Cover size limit when a file is extracted on its own. */

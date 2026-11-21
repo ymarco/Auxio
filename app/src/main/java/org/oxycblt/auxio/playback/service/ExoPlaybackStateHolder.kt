@@ -530,10 +530,10 @@ class ExoPlaybackStateHolder(
             savePosition()
             if (player.isPlaying) {
                 positionSaveJob =
-                    saveScope.launch {
+                    saveScope.launch(Dispatchers.Main) {
                         while (true) {
                             delay(POSITION_SAVE_INTERVAL.milliseconds)
-                            withContext(Dispatchers.Main) { savePosition() }
+                            savePosition()
                         }
                     }
             }

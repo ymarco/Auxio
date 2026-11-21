@@ -89,13 +89,7 @@ private constructor(
             )
     private var trackingJob: Job? = null
     private val reconciler = MediaStoreReconciler(workerContext)
-    private var reconcileJob: Job? = null
-    // Files already handed to the media scanner. Each version of a file is only requested once per
-    // process, so a file the scanner refuses to index can't cause an endless reconcile/reload loop,
-    // while a file that changed since (e.g. was scanned mid-copy) is still rescanned.
     private val requestedScans = HashSet<MediaStoreReconciler.StaleFile>()
-    // MediaStore's generation when the current/last load started.
-    @Volatile private var indexedGeneration: Long? = null
     private var lastChangeCheckMs = 0L
 
     fun attach() {
@@ -107,7 +101,6 @@ private constructor(
     }
 
     fun release() {
-        reconcileJob?.cancel()
         stopTracking()
         musicRepository.unregisterWorker(this)
         musicRepository.removeIndexingListener(this)
@@ -124,10 +117,11 @@ private constructor(
     }
 
     /**
-     * Called whenever the app comes back to the foreground. Without automatic reloading, changes
-     * made while the app was in the background (e.g. syncing new music) would otherwise only show
-     * up after the app is restarted, so reload if MediaStore changed since the last load, and
-     * otherwise check that MediaStore isn't missing anything.
+     * Called whenever the app comes back to the foreground. Unless automatic reloading keeps it in
+     * the foreground, the service (and with it the MediaStore observer) stops while the app is in
+     * the background, so changes made then (e.g. syncing new music) would only show up after the
+     * app is restarted. Reload if MediaStore changed since the last load, and otherwise check that
+     * MediaStore isn't missing anything.
      */
     private fun checkForExternalChanges() {
         if (musicSettings.locationMode != LocationMode.MEDIA_STORE) return
@@ -179,6 +173,7 @@ private constructor(
         }
     }
 
+    @Synchronized
     override fun requestIndex(withCache: Boolean) {
         L.d("Starting new indexing job (previous=${currentIndexJob?.hashCode()})")
         indexedGeneration = mediaStoreGeneration()
@@ -204,33 +199,22 @@ private constructor(
     }
 
     /**
-     * After a successful load from MediaStore, check that MediaStore actually matches the files on
-     * disk, and if it doesn't, get the system to rescan the differing files and reload. This makes
-     * files added outside of normal means (e.g. adb-sync) show up without rebooting the device.
+     * After a successful load from MediaStore, rescan any MediaStore entries that are stuck or
+     * outdated (see [MediaStoreReconciler]). This makes files added outside of normal means (e.g.
+     * adb-sync) show up without rebooting the device. If the rescan changes MediaStore, the
+     * tracking observer reloads the library.
      */
     private fun reconcileMediaStore() {
         if (musicSettings.locationMode != LocationMode.MEDIA_STORE) return
-        if (reconcileJob?.isActive == true) return
-        reconcileJob =
-            indexScope.launch {
-                val stale =
-                    try {
-                        reconciler.findStaleFiles()
-                    } catch (e: Exception) {
-                        android.util.Log.e("MediaStoreReconciler", "Unable to reconcile", e)
-                        return@launch
-                    }
-                val toScan =
-                    synchronized(requestedScans) {
-                        stale.filter { requestedScans.add(it) }.map { it.path }
-                    }
-                if (toScan.isEmpty()) return@launch
-                L.d("Scanning ${toScan.size} files MediaStore is missing or outdated on")
-                if (reconciler.scan(toScan) > 0) {
-                    L.d("MediaStore updated, reloading")
-                    requestIndex(true)
+        indexScope.launch {
+            // Each version of a file is only rescanned once per process, so an entry the scanner
+            // won't fix can't cause repeated rescans.
+            val toScan =
+                synchronized(requestedScans) {
+                    reconciler.findStaleFiles().filter { requestedScans.add(it) }
                 }
-            }
+            if (toScan.isNotEmpty()) reconciler.scan(toScan.map { it.path })
+        }
     }
 
     override fun onMusicChanges(changes: MusicRepository.Changes) {
@@ -316,5 +300,9 @@ private constructor(
     companion object {
         const val WAKELOCK_TIMEOUT_MS = 60 * 1000L
         const val CHANGE_CHECK_INTERVAL_MS = 5 * 1000L
+
+        // MediaStore's generation when the current/last load started. Kept for the whole process
+        // since this holder is recreated along with the service.
+        @Volatile private var indexedGeneration: Long? = null
     }
 }
