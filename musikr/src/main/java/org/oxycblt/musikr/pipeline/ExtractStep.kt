@@ -179,7 +179,7 @@ private class ExtractStepImpl(
                     ?.metadata
             val cover =
                 try {
-                    large?.takeIf { it.cover != null }?.let { createCover(newSong, it) }
+                    large?.let { createCover(newSong, it) }
                 } catch (e: Throwable) {
                     if (e is CancellationException) throw e
                     null // Includes OutOfMemoryError

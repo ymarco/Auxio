@@ -46,6 +46,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.oxycblt.auxio.image.ImageSettings
@@ -103,6 +104,14 @@ class ExoPlaybackStateHolder(
     }
 
     fun release() {
+        // A deferred save may still be pending, e.g. if the queue changed right before the app
+        // was backgrounded and the service stopped. Write it now instead of losing it.
+        if (currentSaveJob?.isActive == true) {
+            currentSaveJob?.cancel()
+            if (sessionOngoing) {
+                runBlocking { persistenceRepository.saveState(playbackManager.toSavedState()) }
+            }
+        }
         saveJob.cancel()
         playbackManager.unregisterStateHolder(this)
         musicRepository.removeUpdateListener(this)
@@ -520,6 +529,15 @@ class ExoPlaybackStateHolder(
         ) {
             L.d("Player state changed, must synchronize state")
             playbackManager.ack(this, StateAck.ProgressionChanged)
+        }
+
+        if (
+            events.contains(Player.EVENT_POSITION_DISCONTINUITY) &&
+                !events.contains(Player.EVENT_IS_PLAYING_CHANGED) &&
+                !player.isPlaying
+        ) {
+            // Seeked while paused, keep the persisted position in sync.
+            savePosition()
         }
 
         if (events.contains(Player.EVENT_IS_PLAYING_CHANGED)) {

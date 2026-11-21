@@ -69,8 +69,9 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
 
     /** Whether MediaStore's audio entries changed since the last [markLoaded]. */
     fun changedSinceLoaded(): Boolean {
-        val fingerprint = audioFingerprint() ?: return false
-        return fingerprint != loadedFingerprint
+        // Nothing to compare to if no load completed (e.g. it failed), don't reload repeatedly.
+        val loaded = loadedFingerprint ?: return false
+        return audioFingerprint().let { it != null && it != loaded }
     }
 
     /**
@@ -90,7 +91,7 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
         try {
             queryAudio(scanProjection, includePending = true)?.use { cursor ->
                 while (cursor.moveToNext()) {
-                    val path = cursor.getString(0) ?: continue
+                    val path = cursor.getString(COL_DATA) ?: continue
                     // Entries named like this are being written through the MediaStore API by an
                     // app that will finish them itself, leave them alone.
                     if (path.substringAfterLast('/').startsWith(".pending-")) continue
@@ -131,9 +132,9 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
     }
 
     private fun Cursor.isStale(file: File, modifiedMs: Long) =
-        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && getInt(3) != 0) ||
-            getLong(1) != file.length() ||
-            getLong(2) != modifiedMs / 1000
+        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && getInt(COL_IS_PENDING) != 0) ||
+            getLong(COL_SIZE) != file.length() ||
+            getLong(COL_DATE_MODIFIED) != modifiedMs / 1000
 
     /**
      * A value that changes whenever an audio entry is added, changed or removed, or null if it
@@ -142,7 +143,10 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
     fun audioFingerprint(): String? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return try {
-            queryAudio(arrayOf(MediaStore.MediaColumns.GENERATION_MODIFIED), false)?.use { cursor ->
+            queryAudio(
+                    arrayOf(MediaStore.MediaColumns.GENERATION_MODIFIED),
+                    includePending = false,
+                )?.use { cursor ->
                 var maxGeneration = 0L
                 while (cursor.moveToNext()) {
                     maxGeneration = maxOf(maxGeneration, cursor.getLong(0))
@@ -170,7 +174,11 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
     private companion object {
         const val SETTLE_TIME_MS = 30 * 1000L
 
-        // Pending entries can only be queried on R+ (see queryAudio).
+        // Indices into scanProjection. Pending entries can only be queried on R+ (see queryAudio).
+        const val COL_DATA = 0
+        const val COL_SIZE = 1
+        const val COL_DATE_MODIFIED = 2
+        const val COL_IS_PENDING = 3
         @Suppress("DEPRECATION") // DATA is still the only way to get a file path for an entry.
         val scanProjection =
             listOfNotNull(
