@@ -40,6 +40,19 @@ android {
         }
     }
 
+    signingConfigs {
+        // Signing for this fork's own release builds, configured in ~/.gradle/gradle.properties
+        // (auxioForkStoreFile, auxioForkStorePassword, auxioForkKeyAlias, auxioForkKeyPassword).
+        if (project.hasProperty("auxioForkStoreFile")) {
+            fork {
+                storeFile file(project.property("auxioForkStoreFile"))
+                storePassword project.property("auxioForkStorePassword")
+                keyAlias project.property("auxioForkKeyAlias")
+                keyPassword project.property("auxioForkKeyPassword")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix ".debug"
@@ -62,6 +75,10 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (project.hasProperty("auxioForkStoreFile")) {
+                signingConfig signingConfigs.fork
+                versionNameSuffix "-fork"
+            }
 
             dependenciesInfo {
                 includeInApk = false
