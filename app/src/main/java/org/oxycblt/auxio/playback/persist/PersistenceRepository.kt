@@ -21,6 +21,7 @@ package org.oxycblt.auxio.playback.persist
 import javax.inject.Inject
 import org.oxycblt.auxio.music.MusicRepository
 import org.oxycblt.auxio.playback.state.PlaybackStateManager
+import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.MusicParent
 import timber.log.Timber as L
 
@@ -39,6 +40,14 @@ interface PersistenceRepository {
      * @param state The [PlaybackStateManager.SavedState] to persist.
      */
     suspend fun saveState(state: PlaybackStateManager.SavedState?): Boolean
+
+    /**
+     * Cheaply update the playback position of the persisted state, without rewriting the queue.
+     * Does nothing if the persisted state is not on [songUid] at [index].
+     *
+     * @return Whether the position was updated.
+     */
+    suspend fun savePosition(songUid: Music.UID, index: Int, positionMs: Long): Boolean
 }
 
 class PersistenceRepositoryImpl
@@ -78,6 +87,15 @@ constructor(
             songUid = playbackState.songUid,
         )
     }
+
+    override suspend fun savePosition(songUid: Music.UID, index: Int, positionMs: Long) =
+        try {
+            playbackStateDao.updatePosition(songUid, index, positionMs) > 0
+        } catch (e: Exception) {
+            L.e("Unable to save playback position")
+            L.e(e.stackTraceToString())
+            false
+        }
 
     override suspend fun saveState(state: PlaybackStateManager.SavedState?): Boolean {
         try {

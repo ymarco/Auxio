@@ -91,6 +91,18 @@ interface PlaybackStateDao {
      * @param state The [PlaybackState] to insert.
      */
     @Insert(onConflict = OnConflictStrategy.ABORT) suspend fun insertState(state: PlaybackState)
+
+    /**
+     * Update only the position of the persisted [PlaybackState], if it is still on [songUid] at
+     * [index].
+     *
+     * @return The number of updated rows, 0 if the persisted state is for another song.
+     */
+    @Query(
+        "UPDATE PlaybackState SET positionMs = :positionMs " +
+            "WHERE id = 0 AND songUid = :songUid AND `index` = :index"
+    )
+    suspend fun updatePosition(songUid: Music.UID, index: Int, positionMs: Long): Int
 }
 
 /**

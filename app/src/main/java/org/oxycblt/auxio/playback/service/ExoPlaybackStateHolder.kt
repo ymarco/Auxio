@@ -84,6 +84,7 @@ class ExoPlaybackStateHolder(
     PlaybackSettings.Listener,
     ImageSettings.Listener {
     private val saveJob = Job()
+    private var positionSaveJob: Job? = null
     private val saveScope = CoroutineScope(Dispatchers.IO + saveJob)
     private val restoreScope = CoroutineScope(Dispatchers.IO + saveJob)
     private var currentSaveJob: Job? = null
@@ -102,6 +103,7 @@ class ExoPlaybackStateHolder(
     }
 
     fun release() {
+        positionSaveJob?.cancel()
         saveJob.cancel()
         playbackManager.unregisterStateHolder(this)
         musicRepository.removeUpdateListener(this)
@@ -520,6 +522,35 @@ class ExoPlaybackStateHolder(
             L.d("Player state changed, must synchronize state")
             playbackManager.ack(this, StateAck.ProgressionChanged)
         }
+
+        if (events.contains(Player.EVENT_IS_PLAYING_CHANGED)) {
+            // Keep the persisted position fresh, so that it survives the process being killed
+            // (e.g. swiping the app away, or the system reclaiming memory) mid-song.
+            positionSaveJob?.cancel()
+            savePosition()
+            if (player.isPlaying) {
+                positionSaveJob =
+                    saveScope.launch {
+                        while (true) {
+                            delay(POSITION_SAVE_INTERVAL.milliseconds)
+                            withContext(Dispatchers.Main) { savePosition() }
+                        }
+                    }
+            }
+        }
+    }
+
+    /**
+     * Persist only the current playback position. This is much cheaper than a full save, which
+     * rewrites the whole queue, and so can be done frequently. If the persisted state is for another
+     * song (a full save is pending), this does nothing.
+     */
+    private fun savePosition() {
+        if (!sessionOngoing) return
+        val state = playbackManager.toSavedState() ?: return
+        saveScope.launch {
+            persistenceRepository.savePosition(state.songUid, state.index, state.positionMs)
+        }
     }
 
     override fun onPlayerError(error: PlaybackException) {
@@ -704,5 +735,6 @@ class ExoPlaybackStateHolder(
 
     private companion object {
         const val SAVE_BUFFER = 5000L
+        const val POSITION_SAVE_INTERVAL = 10000L
     }
 }
