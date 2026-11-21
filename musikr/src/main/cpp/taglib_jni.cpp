@@ -266,6 +266,17 @@ static jobject metadataResultProviderFailed(JNIEnv *env) {
             "org/oxycblt/musikr/metadata/MetadataResult$ProviderFailed");
 }
 
+// Any JNI call made while a Java exception (e.g an OutOfMemoryError) is pending
+// aborts the whole process, so the pending exception has to be cleared before we
+// can construct the failure result. The file is then just skipped.
+static jobject failedResult(JNIEnv *env) {
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+    return metadataResultProviderFailed(env);
+}
+
 extern "C" JNIEXPORT jobject JNICALL
 Java_org_oxycblt_musikr_metadata_TagLibJNI_openNative(JNIEnv *env,
         jobject /* this */,
@@ -313,11 +324,18 @@ Java_org_oxycblt_musikr_metadata_TagLibJNI_openNative(JNIEnv *env,
             return metadataResultNotAudio(env);
         }
         JObjectRef jMetadata {env, jBuilder.build()};
+        if (env->ExceptionCheck() || *jMetadata == nullptr) {
+            throw std::runtime_error("Failed to build metadata object");
+        }
         delete overriddenFile;
         return metadataResultSuccess(env, *jMetadata);
     } catch (std::exception &e) {
         LOGE("Unable to parse metadata in %s: %s", name.c_str(), e.what());
         delete overriddenFile;
-        return metadataResultProviderFailed(env);
+        return failedResult(env);
+    } catch (...) {
+        LOGE("Unable to parse metadata in %s: unknown error", name.c_str());
+        delete overriddenFile;
+        return failedResult(env);
     }
 }

@@ -31,6 +31,9 @@
 
 #include "JTagMap.h"
 
+// Embedded covers larger than this are ignored to avoid OOMing the JVM heap.
+constexpr unsigned int MAX_COVER_BYTES = 16 * 1024 * 1024;
+
 class JMetadataBuilder {
 public:
     JMetadataBuilder(JNIEnv *env);

@@ -30,6 +30,7 @@
 #include "JClassRef.h"
 #include "JStringRef.h"
 #include "JByteArrayRef.h"
+#include "util.h"
 
 JMetadataBuilder::JMetadataBuilder(JNIEnv *env) : env(env), id3v2(env), xiph(
         env), mp4(env), cover(), properties(nullptr) {
@@ -208,6 +209,13 @@ jobject JMetadataBuilder::build() {
     auto jId3v2Map = id3v2.getObject();
     auto jXiphMap = xiph.getObject();
     auto jMp4Map = mp4.getObject();
+    if (cover.has_value() && cover->size() > MAX_COVER_BYTES) {
+        // Some files embed absurdly large covers (e.g 150MB print-resolution scans).
+        // Copying them onto the JVM heap will OOM the app, especially since files
+        // are extracted in parallel. Drop them, other cover sources can still apply.
+        LOGE("Ignoring oversized embedded cover (%u bytes)", cover->size());
+        cover.reset();
+    }
     if (cover.has_value()) {
         JByteArrayRef jCoverArray { env, cover.value() };
         jobject result = env->NewObject(*jMetadataClass, jMetadataInitMethod,
