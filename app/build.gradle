@@ -26,6 +26,9 @@ android {
         targetSdk target_sdk
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // Whether to load music from MediaStore instead of user-picked folders by default.
+        buildConfigField "boolean", "DEFAULT_MEDIA_STORE", "false"
     }
 
     compileOptions {
@@ -44,7 +47,6 @@ android {
         debug {
             applicationIdSuffix ".debug"
             versionNameSuffix "-DEBUG"
-            buildConfigField "boolean", "DEFAULT_MEDIA_STORE", "false"
         }
 
         // Release-optimized build for measuring performance on a device. It installs next to
@@ -64,8 +66,6 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
-
-            buildConfigField "boolean", "DEFAULT_MEDIA_STORE", "false"
 
             dependenciesInfo {
                 includeInApk = false

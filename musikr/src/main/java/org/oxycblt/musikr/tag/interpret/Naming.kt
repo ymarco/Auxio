@@ -106,7 +106,7 @@ private data class IntelligentKnownName(override val raw: String, override val s
         // Transliterate to latin if available. Text that is already entirely latin is left
         // untouched by Any-Latin, so skip the (expensive) transliteration pass for it.
         if (stripped.any { it >= FIRST_NON_LATIN_CHAR }) {
-            latinTransliterator?.let { stripped = it.transliterate(stripped) }
+            latinTransliterator?.let { stripped = synchronized(it) { it.transliterate(stripped) } }
         }
 
         // To properly compare numeric components in names, we have to split them up into

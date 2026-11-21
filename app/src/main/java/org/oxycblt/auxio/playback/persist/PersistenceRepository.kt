@@ -44,10 +44,8 @@ interface PersistenceRepository {
     /**
      * Cheaply update the playback position of the persisted state, without rewriting the queue.
      * Does nothing if the persisted state is not on [songUid] at [index].
-     *
-     * @return Whether the position was updated.
      */
-    suspend fun savePosition(songUid: Music.UID, index: Int, positionMs: Long): Boolean
+    suspend fun savePosition(songUid: Music.UID, index: Int, positionMs: Long)
 }
 
 class PersistenceRepositoryImpl
@@ -88,14 +86,14 @@ constructor(
         )
     }
 
-    override suspend fun savePosition(songUid: Music.UID, index: Int, positionMs: Long) =
+    override suspend fun savePosition(songUid: Music.UID, index: Int, positionMs: Long) {
         try {
-            playbackStateDao.updatePosition(songUid, index, positionMs) > 0
+            playbackStateDao.updatePosition(songUid, index, positionMs)
         } catch (e: Exception) {
             L.e("Unable to save playback position")
             L.e(e.stackTraceToString())
-            false
         }
+    }
 
     override suspend fun saveState(state: PlaybackStateManager.SavedState?): Boolean {
         try {

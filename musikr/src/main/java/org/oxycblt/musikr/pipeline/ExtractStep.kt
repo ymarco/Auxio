@@ -102,12 +102,7 @@ private class ExtractStepImpl(
                     is Finalized -> item
                     is NeedsParsing -> {
                         val tags = tagParser.parse(item.metadata)
-                        val cover =
-                            if (item.largeCover != null) {
-                                item.largeCover.cover
-                            } else {
-                                createCover(item.newSong, item.metadata)
-                            }
+                        val cover = item.cover ?: createCover(item.newSong, item.metadata)
                         NeedsCaching(
                             RawSong(
                                 item.newSong.file,
@@ -169,7 +164,8 @@ private class ExtractStepImpl(
      * The file has an embedded cover too large to load while many files are being extracted in
      * parallel. Re-extract it with a larger limit while holding [largeCoverLock], and turn the
      * cover into a [Cover] before releasing it, so that at most one large cover is in memory at
-     * once. Falls back to the original metadata (without the embedded cover) on any failure.
+     * once. On failure, the cover is left to be resolved from the original metadata, which no longer
+     * has the embedded cover but can still find e.g. a cover image in the song's folder.
      */
     private suspend fun extractLargeCover(newSong: NewSong, metadata: Metadata): NeedsParsing =
         largeCoverLock.withLock {
@@ -182,25 +178,20 @@ private class ExtractStepImpl(
             val cover =
                 try {
                     large?.takeIf { it.cover != null }?.let { createCover(newSong, it) }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    null
-                } catch (e: OutOfMemoryError) {
-                    null
+                } catch (e: Throwable) {
+                    if (e is CancellationException) throw e
+                    null // Includes OutOfMemoryError
                 }
-            NeedsParsing(newSong, metadata, LargeCover(cover))
+            NeedsParsing(newSong, metadata, cover)
         }
 
     private sealed interface ParsedExtractItem
 
-    /** A cover that was resolved ahead of time, see [extractLargeCover]. */
-    private class LargeCover(val cover: Cover?)
-
+    /** [cover] is set if it was already resolved, see [extractLargeCover]. */
     private data class NeedsParsing(
         val newSong: NewSong,
         val metadata: Metadata,
-        val largeCover: LargeCover? = null,
+        val cover: Cover? = null,
     ) : ParsedExtractItem
 
     private sealed interface ParsedCachingItem

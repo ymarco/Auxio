@@ -103,7 +103,6 @@ class ExoPlaybackStateHolder(
     }
 
     fun release() {
-        positionSaveJob?.cancel()
         saveJob.cancel()
         playbackManager.unregisterStateHolder(this)
         musicRepository.removeUpdateListener(this)

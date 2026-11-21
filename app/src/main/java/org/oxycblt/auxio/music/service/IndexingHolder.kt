@@ -19,10 +19,7 @@
 package org.oxycblt.auxio.music.service
 
 import android.content.Context
-import android.os.Build
 import android.os.PowerManager
-import android.os.SystemClock
-import android.provider.MediaStore as AndroidMediaStore
 import coil3.ImageLoader
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -51,6 +48,7 @@ private constructor(
     private val musicRepository: MusicRepository,
     private val musicSettings: MusicSettings,
     private val imageLoader: ImageLoader,
+    private val reconciler: MediaStoreReconciler,
 ) :
     MusicRepository.IndexingWorker,
     MusicRepository.IndexingListener,
@@ -63,6 +61,7 @@ private constructor(
         private val musicRepository: MusicRepository,
         private val musicSettings: MusicSettings,
         private val imageLoader: ImageLoader,
+        private val reconciler: MediaStoreReconciler,
     ) {
         fun create(context: Context, listener: ForegroundListener) =
             IndexingHolder(
@@ -72,6 +71,7 @@ private constructor(
                 musicRepository,
                 musicSettings,
                 imageLoader,
+                reconciler,
             )
     }
 
@@ -88,9 +88,6 @@ private constructor(
                 BuildConfig.APPLICATION_ID + ":IndexingComponent",
             )
     private var trackingJob: Job? = null
-    private val reconciler = MediaStoreReconciler(workerContext)
-    private val requestedScans = HashSet<MediaStoreReconciler.StaleFile>()
-    private var lastChangeCheckMs = 0L
 
     fun attach() {
         musicSettings.registerListener(this)
@@ -125,29 +122,13 @@ private constructor(
      */
     private fun checkForExternalChanges() {
         if (musicSettings.locationMode != LocationMode.MEDIA_STORE) return
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastChangeCheckMs < CHANGE_CHECK_INTERVAL_MS) return
-        lastChangeCheckMs = now
         indexScope.launch {
-            val generation = mediaStoreGeneration()
-            if (generation != null && generation != indexedGeneration) {
+            if (reconciler.changedSinceLoaded()) {
                 L.d("MediaStore changed since last load, reloading")
                 requestIndex(true)
             } else {
-                reconcileMediaStore()
+                reconciler.reconcile()
             }
-        }
-    }
-
-    /** A number that changes whenever MediaStore changes, or null if unavailable. */
-    private fun mediaStoreGeneration(): Long? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        return try {
-            AndroidMediaStore.getExternalVolumeNames(workerContext).sumOf {
-                AndroidMediaStore.getGeneration(workerContext, it)
-            }
-        } catch (e: Exception) {
-            null
         }
     }
 
@@ -176,11 +157,13 @@ private constructor(
     @Synchronized
     override fun requestIndex(withCache: Boolean) {
         L.d("Starting new indexing job (previous=${currentIndexJob?.hashCode()})")
-        indexedGeneration = mediaStoreGeneration()
         // Cancel the previous music loading job.
         currentIndexJob?.cancel()
         // Start a new music loading job on a co-routine.
         currentIndexJob = indexScope.launch {
+            if (musicSettings.locationMode == LocationMode.MEDIA_STORE) {
+                reconciler.onLoadStarted()
+            }
             musicRepository.index(this@IndexingHolder, withCache)
         }
     }
@@ -193,27 +176,15 @@ private constructor(
         } else {
             wakeLock.releaseSafe()
         }
-        if (state is IndexingState.Completed && state.error == null) {
-            reconcileMediaStore()
-        }
-    }
-
-    /**
-     * After a successful load from MediaStore, rescan any MediaStore entries that are stuck or
-     * outdated (see [MediaStoreReconciler]). This makes files added outside of normal means (e.g.
-     * adb-sync) show up without rebooting the device. If the rescan changes MediaStore, the
-     * tracking observer reloads the library.
-     */
-    private fun reconcileMediaStore() {
-        if (musicSettings.locationMode != LocationMode.MEDIA_STORE) return
-        indexScope.launch {
-            // Each version of a file is only rescanned once per process, so an entry the scanner
-            // won't fix can't cause repeated rescans.
-            val toScan =
-                synchronized(requestedScans) {
-                    reconciler.findStaleFiles().filter { requestedScans.add(it) }
-                }
-            if (toScan.isNotEmpty()) reconciler.scan(toScan.map { it.path })
+        if (
+            state is IndexingState.Completed &&
+                state.error == null &&
+                musicSettings.locationMode == LocationMode.MEDIA_STORE
+        ) {
+            reconciler.onLoadCompleted()
+            // Fix up any MediaStore entries that are stuck or outdated (e.g. files synced with
+            // adb-sync). If that changes MediaStore, the tracking observer reloads the library.
+            reconciler.reconcile()
         }
     }
 
@@ -299,10 +270,5 @@ private constructor(
 
     companion object {
         const val WAKELOCK_TIMEOUT_MS = 60 * 1000L
-        const val CHANGE_CHECK_INTERVAL_MS = 5 * 1000L
-
-        // MediaStore's generation when the current/last load started. Kept for the whole process
-        // since this holder is recreated along with the service.
-        @Volatile private var indexedGeneration: Long? = null
     }
 }

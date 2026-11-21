@@ -19,111 +19,177 @@
 package org.oxycblt.auxio.music.service
 
 import android.content.Context
+import android.database.Cursor
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
-import android.util.Log
+import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import timber.log.Timber as L
 
 /**
- * Brings MediaStore's audio entries up to date with the files they point to.
+ * Keeps MediaStore's audio entries in line with the files they point to, and tells whether they
+ * changed since the library was last loaded.
  *
  * MediaStore is not always told when a file finishes changing. Files copied over adb (e.g. with
  * adb-sync) can be left as "pending" entries that no app can see until the device reboots, or be
  * indexed mid-copy with the wrong size. Since MediaStore-based loading only sees what MediaStore
- * knows about, this finds such entries and asks the media scanner to rescan them. MediaStore then
- * notifies its observers, which reloads the library.
+ * knows about, [reconcile] finds such entries and asks the media scanner to rescan them. MediaStore
+ * then notifies its observers, which reloads the library.
+ *
+ * This is a singleton since the service that uses it is recreated whenever the app returns to the
+ * foreground, and its state has to outlive that.
  */
-class MediaStoreReconciler(private val context: Context) {
-    /**
-     * An entry to rescan. [version] identifies the state of the file on disk, so a file that changed
-     * since it was last rescanned can be told apart from one the scanner won't index.
-     */
-    data class StaleFile(val path: String, val version: String)
+@Singleton
+class MediaStoreReconciler @Inject constructor(@ApplicationContext private val context: Context) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Each version of a file is only rescanned once per process, so an entry the scanner won't
+    // fix can't cause repeated rescans, while a file that changed since is still rescanned.
+    private val requestedScans = HashSet<String>()
+    private var retryJob: Job? = null
+    @Volatile private var loadingFingerprint: String? = null
+    @Volatile private var loadedFingerprint: String? = null
+
+    /** Call before loading the library, to remember the state of MediaStore's audio entries. */
+    fun onLoadStarted() {
+        loadingFingerprint = audioFingerprint()
+    }
 
     /**
-     * Find the entries that are stuck pending, disagree with their file, or whose file is gone.
-     * This is cheap: one query plus a stat per entry (~50ms for 5000 songs).
+     * Call after the library loaded successfully. Loads can be cancelled, or stall while the app
+     * is frozen in the background, so only completed ones count.
      */
-    @Suppress("DEPRECATION") // DATA is still the only way to get a file path for an entry.
-    fun findStaleFiles(): List<StaleFile> {
+    fun onLoadCompleted() {
+        loadedFingerprint = loadingFingerprint
+    }
+
+    /** Whether MediaStore's audio entries changed since the last completed load. */
+    fun changedSinceLoaded(): Boolean {
+        val fingerprint = audioFingerprint() ?: return false
+        return fingerprint != loadedFingerprint
+    }
+
+    /**
+     * Rescan entries that are stuck pending, disagree with their file, or whose file is gone. Files
+     * that were modified very recently are probably still being copied, so they are checked again
+     * once they had time to settle.
+     */
+    fun reconcile() {
+        scope.launch { reconcileNow() }
+    }
+
+    @Synchronized
+    private fun reconcileNow() {
         val start = System.currentTimeMillis()
-        val stale = mutableListOf<StaleFile>()
-        val projection =
-            arrayOf(
-                MediaStore.MediaColumns.DATA,
-                MediaStore.MediaColumns.SIZE,
-                MediaStore.MediaColumns.DATE_MODIFIED,
-                MediaStore.MediaColumns.IS_PENDING,
-            )
+        val toScan = mutableListOf<String>()
+        var settling = false
         try {
-            query(projection)?.use { cursor ->
+            queryAudio(scanProjection, includePending = true)?.use { cursor ->
                 while (cursor.moveToNext()) {
                     val path = cursor.getString(0) ?: continue
-                    // Entries named like this are being written through the MediaStore API by
-                    // an app that will finish them itself, leave them alone.
+                    // Entries named like this are being written through the MediaStore API by an
+                    // app that will finish them itself, leave them alone.
                     if (path.substringAfterLast('/').startsWith(".pending-")) continue
                     val file = File(path)
                     val modifiedMs = file.lastModified()
-                    if (modifiedMs == 0L) {
-                        stale.add(StaleFile(path, MISSING))
-                        continue
-                    }
-                    // Don't rescan files that are probably still being copied, the scanner would
-                    // just record a partial file again.
-                    if (start - modifiedMs < SETTLE_TIME_MS) continue
-                    val size = file.length()
-                    val isPending = cursor.getInt(3) != 0
-                    if (
-                        isPending ||
-                            cursor.getLong(1) != size ||
-                            cursor.getLong(2) != modifiedMs / 1000
-                    ) {
-                        stale.add(StaleFile(path, "$size:$modifiedMs"))
+                    val version =
+                        when {
+                            modifiedMs == 0L -> "missing"
+                            start - modifiedMs < SETTLE_TIME_MS -> {
+                                settling = true
+                                continue
+                            }
+                            cursor.isStale(file, modifiedMs) -> "${file.length()}:$modifiedMs"
+                            else -> continue
+                        }
+                    if (requestedScans.add("$path:$version")) {
+                        toScan.add(path)
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Unable to reconcile MediaStore", e)
-            return emptyList()
+            L.e("Unable to reconcile MediaStore")
+            L.e(e.stackTraceToString())
+            return
         }
-        Log.i(TAG, "Found ${stale.size} stale entries in ${System.currentTimeMillis() - start}ms")
-        return stale
+        L.d("Reconciled MediaStore in ${System.currentTimeMillis() - start}ms")
+        if (toScan.isNotEmpty()) {
+            L.d("Rescanning ${toScan.size} files")
+            MediaScannerConnection.scanFile(context, toScan.toTypedArray(), null, null)
+        }
+        if (settling) {
+            retryJob?.cancel()
+            retryJob = scope.launch {
+                delay(SETTLE_TIME_MS)
+                reconcileNow()
+            }
+        }
     }
 
-    /** Ask the media scanner to rescan [paths]. Returns immediately. */
-    fun scan(paths: List<String>) {
-        Log.i(TAG, "Rescanning ${paths.size} files")
-        MediaScannerConnection.scanFile(context, paths.toTypedArray(), null, null)
-    }
+    private fun Cursor.isStale(file: File, modifiedMs: Long) =
+        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && getInt(3) != 0) ||
+            getLong(1) != file.length() ||
+            getLong(2) != modifiedMs / 1000
 
-    private fun query(projection: Array<String>) =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Pending entries are hidden by default, and are exactly the ones we're after.
-            val args =
-                Bundle().apply {
-                    putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+    /**
+     * A value that changes whenever an audio entry is added, changed or removed, or null if it
+     * can't be computed on this version of Android.
+     */
+    private fun audioFingerprint(): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            queryAudio(arrayOf(MediaStore.MediaColumns.GENERATION_MODIFIED), false)?.use { cursor ->
+                var maxGeneration = 0L
+                while (cursor.moveToNext()) {
+                    maxGeneration = maxOf(maxGeneration, cursor.getLong(0))
                 }
-            context.contentResolver.query(
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                args,
-                null,
-            )
-        } else {
-            context.contentResolver.query(
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                null,
-                null,
-                null,
-            )
+                "${cursor.count}:$maxGeneration"
+            }
+        } catch (e: Exception) {
+            L.e("Unable to fingerprint MediaStore")
+            L.e(e.stackTraceToString())
+            null
         }
+    }
+
+    private fun queryAudio(projection: Array<String>, includePending: Boolean): Cursor? {
+        val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        return if (includePending && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val args = Bundle()
+            args.putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+            context.contentResolver.query(uri, projection, args, null)
+        } else {
+            context.contentResolver.query(uri, projection, null, null, null)
+        }
+    }
 
     private companion object {
-        const val TAG = "MediaStoreReconciler"
-        const val MISSING = "missing"
         const val SETTLE_TIME_MS = 30 * 1000L
+
+        @Suppress("DEPRECATION") // DATA is still the only way to get a file path for an entry.
+        val scanProjection =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                arrayOf(
+                    MediaStore.MediaColumns.DATA,
+                    MediaStore.MediaColumns.SIZE,
+                    MediaStore.MediaColumns.DATE_MODIFIED,
+                    MediaStore.MediaColumns.IS_PENDING,
+                )
+            } else {
+                arrayOf(
+                    MediaStore.MediaColumns.DATA,
+                    MediaStore.MediaColumns.SIZE,
+                    MediaStore.MediaColumns.DATE_MODIFIED,
+                )
+            }
     }
 }
