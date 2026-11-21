@@ -19,7 +19,10 @@
 package org.oxycblt.auxio.music.service
 
 import android.content.Context
+import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
+import android.provider.MediaStore as AndroidMediaStore
 import coil3.ImageLoader
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -85,6 +88,15 @@ private constructor(
                 BuildConfig.APPLICATION_ID + ":IndexingComponent",
             )
     private var trackingJob: Job? = null
+    private val reconciler = MediaStoreReconciler(workerContext)
+    private var reconcileJob: Job? = null
+    // Files already handed to the media scanner. Each version of a file is only requested once per
+    // process, so a file the scanner refuses to index can't cause an endless reconcile/reload loop,
+    // while a file that changed since (e.g. was scanned mid-copy) is still rescanned.
+    private val requestedScans = HashSet<MediaStoreReconciler.StaleFile>()
+    // MediaStore's generation when the current/last load started.
+    @Volatile private var indexedGeneration: Long? = null
+    private var lastChangeCheckMs = 0L
 
     fun attach() {
         musicSettings.registerListener(this)
@@ -95,6 +107,7 @@ private constructor(
     }
 
     fun release() {
+        reconcileJob?.cancel()
         stopTracking()
         musicRepository.unregisterWorker(this)
         musicRepository.removeIndexingListener(this)
@@ -103,8 +116,44 @@ private constructor(
     }
 
     fun start() {
-        if (musicRepository.indexingState == null) {
-            requestIndex(true)
+        when (musicRepository.indexingState) {
+            null -> requestIndex(true)
+            is IndexingState.Completed -> checkForExternalChanges()
+            else -> {}
+        }
+    }
+
+    /**
+     * Called whenever the app comes back to the foreground. Without automatic reloading, changes
+     * made while the app was in the background (e.g. syncing new music) would otherwise only show
+     * up after the app is restarted, so reload if MediaStore changed since the last load, and
+     * otherwise check that MediaStore isn't missing anything.
+     */
+    private fun checkForExternalChanges() {
+        if (musicSettings.locationMode != LocationMode.MEDIA_STORE) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastChangeCheckMs < CHANGE_CHECK_INTERVAL_MS) return
+        lastChangeCheckMs = now
+        indexScope.launch {
+            val generation = mediaStoreGeneration()
+            if (generation != null && generation != indexedGeneration) {
+                L.d("MediaStore changed since last load, reloading")
+                requestIndex(true)
+            } else {
+                reconcileMediaStore()
+            }
+        }
+    }
+
+    /** A number that changes whenever MediaStore changes, or null if unavailable. */
+    private fun mediaStoreGeneration(): Long? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            AndroidMediaStore.getExternalVolumeNames(workerContext).sumOf {
+                AndroidMediaStore.getGeneration(workerContext, it)
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -132,6 +181,7 @@ private constructor(
 
     override fun requestIndex(withCache: Boolean) {
         L.d("Starting new indexing job (previous=${currentIndexJob?.hashCode()})")
+        indexedGeneration = mediaStoreGeneration()
         // Cancel the previous music loading job.
         currentIndexJob?.cancel()
         // Start a new music loading job on a co-routine.
@@ -148,6 +198,39 @@ private constructor(
         } else {
             wakeLock.releaseSafe()
         }
+        if (state is IndexingState.Completed && state.error == null) {
+            reconcileMediaStore()
+        }
+    }
+
+    /**
+     * After a successful load from MediaStore, check that MediaStore actually matches the files on
+     * disk, and if it doesn't, get the system to rescan the differing files and reload. This makes
+     * files added outside of normal means (e.g. adb-sync) show up without rebooting the device.
+     */
+    private fun reconcileMediaStore() {
+        if (musicSettings.locationMode != LocationMode.MEDIA_STORE) return
+        if (reconcileJob?.isActive == true) return
+        reconcileJob =
+            indexScope.launch {
+                val stale =
+                    try {
+                        reconciler.findStaleFiles()
+                    } catch (e: Exception) {
+                        android.util.Log.e("MediaStoreReconciler", "Unable to reconcile", e)
+                        return@launch
+                    }
+                val toScan =
+                    synchronized(requestedScans) {
+                        stale.filter { requestedScans.add(it) }.map { it.path }
+                    }
+                if (toScan.isEmpty()) return@launch
+                L.d("Scanning ${toScan.size} files MediaStore is missing or outdated on")
+                if (reconciler.scan(toScan) > 0) {
+                    L.d("MediaStore updated, reloading")
+                    requestIndex(true)
+                }
+            }
     }
 
     override fun onMusicChanges(changes: MusicRepository.Changes) {
@@ -232,5 +315,6 @@ private constructor(
 
     companion object {
         const val WAKELOCK_TIMEOUT_MS = 60 * 1000L
+        const val CHANGE_CHECK_INTERVAL_MS = 5 * 1000L
     }
 }
