@@ -105,6 +105,9 @@ private constructor(
         musicSettings.unregisterListener(this)
     }
 
+    // Start and bind both call start() when the app opens, only check once.
+    private var checkJob: Job? = null
+
     private val usesMediaStore
         get() = musicSettings.locationMode == LocationMode.MEDIA_STORE
 
@@ -126,8 +129,8 @@ private constructor(
      * fix up any entries it's stuck on.
      */
     private fun checkForExternalChanges() {
-        if (!usesMediaStore) return
-        indexScope.launch {
+        if (!usesMediaStore || checkJob?.isActive == true) return
+        checkJob = indexScope.launch {
             if (reconciler.changedSinceLoaded()) {
                 L.d("MediaStore changed since last load, reloading")
                 requestIndex(true)
@@ -173,10 +176,8 @@ private constructor(
             // background, so only a completed load means MediaStore's state at its start is shown.
             val state = musicRepository.indexingState
             if (mediaStore && state is IndexingState.Completed && state.error == null) {
-                reconciler.markLoaded(fingerprint)
-                // Fix up any MediaStore entries that are stuck or outdated (e.g. files synced with
-                // adb-sync). If that changes MediaStore, the tracking observer reloads the library.
-                reconciler.reconcile()
+                // If fixing up stuck entries changes MediaStore, the tracking observer reloads.
+                reconciler.onLoaded(fingerprint)
             }
         }
     }

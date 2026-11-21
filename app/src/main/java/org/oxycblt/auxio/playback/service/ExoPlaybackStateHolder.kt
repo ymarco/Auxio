@@ -85,10 +85,10 @@ class ExoPlaybackStateHolder(
     PlaybackSettings.Listener,
     ImageSettings.Listener {
     private val saveJob = Job()
-    private var positionSaveJob: Job? = null
     private val saveScope = CoroutineScope(Dispatchers.IO + saveJob)
     private val restoreScope = CoroutineScope(Dispatchers.IO + saveJob)
     private var currentSaveJob: Job? = null
+    private var positionSaveJob: Job? = null
     private var openAudioEffectSession = false
 
     var sessionOngoing = false
@@ -104,10 +104,19 @@ class ExoPlaybackStateHolder(
     }
 
     fun release() {
-        // Pending saves are cancelled below (e.g. a queue change right before the app was
-        // backgrounded and the service stopped), so write the final state now instead.
+        // Pending saves are cancelled below, e.g. after a queue change right before the app was
+        // backgrounded and the service stopped. Write them now instead, cheaply if only the
+        // position may be outdated.
         if (sessionOngoing) {
-            runBlocking { persistenceRepository.saveState(playbackManager.toSavedState()) }
+            val pendingFullSave = currentSaveJob?.isActive == true
+            runBlocking {
+                val state = playbackManager.toSavedState()
+                if (pendingFullSave || state == null) {
+                    persistenceRepository.saveState(state)
+                } else {
+                    persistenceRepository.savePosition(state.songUid, state.index, state.positionMs)
+                }
+            }
         }
         saveJob.cancel()
         playbackManager.unregisterStateHolder(this)

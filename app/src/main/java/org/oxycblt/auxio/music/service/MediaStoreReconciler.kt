@@ -24,8 +24,9 @@ import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.system.ErrnoException
+import android.system.Os
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -60,14 +61,16 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
     @Volatile private var loadedFingerprint: String? = null
 
     /**
-     * Record that the library was loaded from MediaStore as it was at [fingerprint], taken with
-     * [audioFingerprint] right before the load started.
+     * Call after the library was loaded from MediaStore as it was at [fingerprint], taken with
+     * [audioFingerprint] right before the load started. Also fixes up any entries MediaStore is
+     * stuck on (see [reconcile]).
      */
-    fun markLoaded(fingerprint: String?) {
+    fun onLoaded(fingerprint: String?) {
         loadedFingerprint = fingerprint
+        reconcile()
     }
 
-    /** Whether MediaStore's audio entries changed since the last [markLoaded]. */
+    /** Whether MediaStore's audio entries changed since the last [onLoaded]. */
     fun changedSinceLoaded(): Boolean {
         // Nothing to compare to if no load completed (e.g. it failed), don't reload repeatedly.
         val loaded = loadedFingerprint ?: return false
@@ -95,16 +98,21 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
                     // Entries named like this are being written through the MediaStore API by an
                     // app that will finish them itself, leave them alone.
                     if (path.substringAfterLast('/').startsWith(".pending-")) continue
-                    val file = File(path)
-                    val modifiedMs = file.lastModified()
+                    val stat =
+                        try {
+                            Os.stat(path)
+                        } catch (e: ErrnoException) {
+                            null
+                        }
                     val version =
                         when {
-                            modifiedMs == 0L -> "missing"
-                            start - modifiedMs in 0 until SETTLE_TIME_MS -> {
+                            stat == null -> "missing"
+                            start / 1000 - stat.st_mtime in 0 until SETTLE_TIME_SECS -> {
                                 settling = true
                                 continue
                             }
-                            cursor.isStale(file, modifiedMs) -> "${file.length()}:$modifiedMs"
+                            cursor.isStale(stat.st_size, stat.st_mtime) ->
+                                "${stat.st_size}:${stat.st_mtime}"
                             else -> continue
                         }
                     if (requestedScans.add("$path:$version")) {
@@ -125,16 +133,16 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
         if (settling) {
             retryJob?.cancel()
             retryJob = scope.launch {
-                delay(SETTLE_TIME_MS)
+                delay(SETTLE_TIME_SECS * 1000)
                 reconcileNow()
             }
         }
     }
 
-    private fun Cursor.isStale(file: File, modifiedMs: Long) =
+    private fun Cursor.isStale(size: Long, modifiedSecs: Long) =
         (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && getInt(COL_IS_PENDING) != 0) ||
-            getLong(COL_SIZE) != file.length() ||
-            getLong(COL_DATE_MODIFIED) != modifiedMs / 1000
+            getLong(COL_SIZE) != size ||
+            getLong(COL_DATE_MODIFIED) != modifiedSecs
 
     /**
      * A value that changes whenever an audio entry is added, changed or removed, or null if it
@@ -147,11 +155,13 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
                     arrayOf(MediaStore.MediaColumns.GENERATION_MODIFIED),
                     includePending = false,
                 )?.use { cursor ->
-                var maxGeneration = 0L
+                // Generations are counted per volume, so a max would miss changes on a volume with
+                // lower generations than another. A sum changes with any insert, update or delete.
+                var generationSum = 0L
                 while (cursor.moveToNext()) {
-                    maxGeneration = maxOf(maxGeneration, cursor.getLong(0))
+                    generationSum += cursor.getLong(0)
                 }
-                "${cursor.count}:$maxGeneration"
+                "${cursor.count}:$generationSum"
             }
         } catch (e: Exception) {
             L.e("Unable to fingerprint MediaStore")
@@ -172,7 +182,7 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
     }
 
     private companion object {
-        const val SETTLE_TIME_MS = 30 * 1000L
+        const val SETTLE_TIME_SECS = 30L
 
         // Indices into scanProjection. Pending entries can only be queried on R+ (see queryAudio).
         const val COL_DATA = 0
