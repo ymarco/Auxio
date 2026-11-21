@@ -65,6 +65,8 @@ private class ExtractStepImpl(
     private val cache: MutableCache,
     private val covers: MutableCovers<out Cover>,
 ) : ExtractStep {
+    private val largeCoverLock = Mutex()
+
     override suspend fun extract(
         scope: CoroutineScope,
         explored: Channel<Explored>,
@@ -202,8 +204,6 @@ private class ExtractStepImpl(
 
     private fun RawSong.toCachedFile() =
         CachedFile(file, audio = Audio(properties, tags, cover?.id), addedMs)
-
-    private val largeCoverLock = Mutex()
 
     private companion object {
         const val PARALLELISM = 8

@@ -2,4 +2,5 @@
 <resources>
     <string name="info_app_name" translatable="false">Auxio Bench</string>
     <string name="pkg_authority_cover">org.oxycblt.auxio.bench.image.CoverProvider</string>
+    <bool name="def_media_store">true</bool>
 </resources>

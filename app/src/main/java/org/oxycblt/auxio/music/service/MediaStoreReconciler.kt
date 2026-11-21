@@ -53,26 +53,21 @@ import timber.log.Timber as L
 class MediaStoreReconciler @Inject constructor(@ApplicationContext private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Each version of a file is only rescanned once per process, so an entry the scanner won't
-    // fix can't cause repeated rescans, while a file that changed since is still rescanned.
+    // fix can't cause repeated rescans, while a file that changed since is still rescanned. (Such
+    // an entry does cost one extra reload per process start, which isn't worth persisting this.)
     private val requestedScans = HashSet<String>()
     private var retryJob: Job? = null
-    @Volatile private var loadingFingerprint: String? = null
     @Volatile private var loadedFingerprint: String? = null
 
-    /** Call before loading the library, to remember the state of MediaStore's audio entries. */
-    fun onLoadStarted() {
-        loadingFingerprint = audioFingerprint()
-    }
-
     /**
-     * Call after the library loaded successfully. Loads can be cancelled, or stall while the app
-     * is frozen in the background, so only completed ones count.
+     * Record that the library was loaded from MediaStore as it was at [fingerprint], taken with
+     * [audioFingerprint] right before the load started.
      */
-    fun onLoadCompleted() {
-        loadedFingerprint = loadingFingerprint
+    fun markLoaded(fingerprint: String?) {
+        loadedFingerprint = fingerprint
     }
 
-    /** Whether MediaStore's audio entries changed since the last completed load. */
+    /** Whether MediaStore's audio entries changed since the last [markLoaded]. */
     fun changedSinceLoaded(): Boolean {
         val fingerprint = audioFingerprint() ?: return false
         return fingerprint != loadedFingerprint
@@ -104,7 +99,7 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
                     val version =
                         when {
                             modifiedMs == 0L -> "missing"
-                            start - modifiedMs < SETTLE_TIME_MS -> {
+                            start - modifiedMs in 0 until SETTLE_TIME_MS -> {
                                 settling = true
                                 continue
                             }
@@ -136,7 +131,7 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
     }
 
     private fun Cursor.isStale(file: File, modifiedMs: Long) =
-        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && getInt(3) != 0) ||
+        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && getInt(3) != 0) ||
             getLong(1) != file.length() ||
             getLong(2) != modifiedMs / 1000
 
@@ -144,7 +139,7 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
      * A value that changes whenever an audio entry is added, changed or removed, or null if it
      * can't be computed on this version of Android.
      */
-    private fun audioFingerprint(): String? {
+    fun audioFingerprint(): String? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return try {
             queryAudio(arrayOf(MediaStore.MediaColumns.GENERATION_MODIFIED), false)?.use { cursor ->
@@ -175,21 +170,17 @@ class MediaStoreReconciler @Inject constructor(@ApplicationContext private val c
     private companion object {
         const val SETTLE_TIME_MS = 30 * 1000L
 
+        // Pending entries can only be queried on R+ (see queryAudio).
         @Suppress("DEPRECATION") // DATA is still the only way to get a file path for an entry.
         val scanProjection =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                arrayOf(
+            listOfNotNull(
                     MediaStore.MediaColumns.DATA,
                     MediaStore.MediaColumns.SIZE,
                     MediaStore.MediaColumns.DATE_MODIFIED,
-                    MediaStore.MediaColumns.IS_PENDING,
+                    MediaStore.MediaColumns.IS_PENDING.takeIf {
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    },
                 )
-            } else {
-                arrayOf(
-                    MediaStore.MediaColumns.DATA,
-                    MediaStore.MediaColumns.SIZE,
-                    MediaStore.MediaColumns.DATE_MODIFIED,
-                )
-            }
+                .toTypedArray()
     }
 }

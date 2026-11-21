@@ -24,7 +24,6 @@ import androidx.core.net.toUri
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.UUID
 import javax.inject.Inject
-import org.oxycblt.auxio.BuildConfig
 import org.oxycblt.auxio.IntegerTable
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.music.locations.LocationMode
@@ -114,14 +113,21 @@ class MusicSettingsImpl @Inject constructor(@ApplicationContext private val cont
     override val useFileTreeCache: Boolean
         get() = sharedPreferences.getBoolean(getString(R.string.set_key_fs_cache), false)
 
+    private val defaultLocationMode =
+        if (context.resources.getBoolean(R.bool.def_media_store)) {
+            LocationMode.MEDIA_STORE
+        } else {
+            LocationMode.SAF
+        }
+
     override var locationMode: LocationMode
         get() {
             val mode =
                 sharedPreferences.getInt(
                     getString(R.string.set_key_locations_mode),
-                    DEFAULT_LOCATION_MODE.intCode,
+                    defaultLocationMode.intCode,
                 )
-            return LocationMode.fromInt(mode) ?: DEFAULT_LOCATION_MODE
+            return LocationMode.fromInt(mode) ?: defaultLocationMode
         }
         set(value) {
             sharedPreferences.edit {
@@ -302,6 +308,3 @@ class MusicSettingsImpl @Inject constructor(@ApplicationContext private val cont
         return split
     }
 }
-
-private val DEFAULT_LOCATION_MODE =
-    if (BuildConfig.DEFAULT_MEDIA_STORE) LocationMode.MEDIA_STORE else LocationMode.SAF

@@ -26,9 +26,6 @@ android {
         targetSdk target_sdk
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-
-        // Whether to load music from MediaStore instead of user-picked folders by default.
-        buildConfigField "boolean", "DEFAULT_MEDIA_STORE", "false"
     }
 
     compileOptions {
@@ -59,7 +56,6 @@ android {
             signingConfig signingConfigs.debug
             matchingFallbacks = ["release"]
             profileable true
-            buildConfigField "boolean", "DEFAULT_MEDIA_STORE", "true"
         }
 
         release {

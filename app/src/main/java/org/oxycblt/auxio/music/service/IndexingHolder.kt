@@ -105,11 +105,16 @@ private constructor(
         musicSettings.unregisterListener(this)
     }
 
+    private val usesMediaStore
+        get() = musicSettings.locationMode == LocationMode.MEDIA_STORE
+
     fun start() {
         when (musicRepository.indexingState) {
-            null -> requestIndex(true)
             is IndexingState.Completed -> checkForExternalChanges()
-            else -> {}
+            // Either nothing was loaded yet, or a load is in progress. If it isn't ours, it was
+            // cancelled when a previous instance of the service was released, and will never
+            // finish, so restart it.
+            else -> if (currentIndexJob?.isActive != true) requestIndex(true)
         }
     }
 
@@ -121,7 +126,7 @@ private constructor(
      * MediaStore isn't missing anything.
      */
     private fun checkForExternalChanges() {
-        if (musicSettings.locationMode != LocationMode.MEDIA_STORE) return
+        if (!usesMediaStore) return
         indexScope.launch {
             if (reconciler.changedSinceLoaded()) {
                 L.d("MediaStore changed since last load, reloading")
@@ -161,10 +166,18 @@ private constructor(
         currentIndexJob?.cancel()
         // Start a new music loading job on a co-routine.
         currentIndexJob = indexScope.launch {
-            if (musicSettings.locationMode == LocationMode.MEDIA_STORE) {
-                reconciler.onLoadStarted()
-            }
+            val mediaStore = usesMediaStore
+            val fingerprint = if (mediaStore) reconciler.audioFingerprint() else null
             musicRepository.index(this@IndexingHolder, withCache)
+            // Cancelled loads never get here. Loads can also stall while the app is frozen in the
+            // background, so only a completed load means MediaStore's state at its start is shown.
+            val state = musicRepository.indexingState
+            if (mediaStore && state is IndexingState.Completed && state.error == null) {
+                reconciler.markLoaded(fingerprint)
+                // Fix up any MediaStore entries that are stuck or outdated (e.g. files synced with
+                // adb-sync). If that changes MediaStore, the tracking observer reloads the library.
+                reconciler.reconcile()
+            }
         }
     }
 
@@ -175,16 +188,6 @@ private constructor(
             wakeLock.acquireSafe()
         } else {
             wakeLock.releaseSafe()
-        }
-        if (
-            state is IndexingState.Completed &&
-                state.error == null &&
-                musicSettings.locationMode == LocationMode.MEDIA_STORE
-        ) {
-            reconciler.onLoadCompleted()
-            // Fix up any MediaStore entries that are stuck or outdated (e.g. files synced with
-            // adb-sync). If that changes MediaStore, the tracking observer reloads the library.
-            reconciler.reconcile()
         }
     }
 
