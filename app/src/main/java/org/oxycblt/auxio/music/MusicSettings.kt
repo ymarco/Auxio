@@ -24,6 +24,7 @@ import androidx.core.net.toUri
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.UUID
 import javax.inject.Inject
+import org.oxycblt.auxio.BuildConfig
 import org.oxycblt.auxio.IntegerTable
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.music.locations.LocationMode
@@ -118,9 +119,9 @@ class MusicSettingsImpl @Inject constructor(@ApplicationContext private val cont
             val mode =
                 sharedPreferences.getInt(
                     getString(R.string.set_key_locations_mode),
-                    IntegerTable.LOCATION_MODE_SAF,
+                    DEFAULT_LOCATION_MODE.intCode,
                 )
-            return LocationMode.fromInt(mode) ?: LocationMode.SAF
+            return LocationMode.fromInt(mode) ?: DEFAULT_LOCATION_MODE
         }
         set(value) {
             sharedPreferences.edit {
@@ -301,3 +302,6 @@ class MusicSettingsImpl @Inject constructor(@ApplicationContext private val cont
         return split
     }
 }
+
+private val DEFAULT_LOCATION_MODE =
+    if (BuildConfig.DEFAULT_MEDIA_STORE) LocationMode.MEDIA_STORE else LocationMode.SAF

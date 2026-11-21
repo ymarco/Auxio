@@ -44,12 +44,28 @@ android {
         debug {
             applicationIdSuffix ".debug"
             versionNameSuffix "-DEBUG"
+            buildConfigField "boolean", "DEFAULT_MEDIA_STORE", "false"
+        }
+
+        // Release-optimized build for measuring performance on a device. It installs next to
+        // the real app, is signed with the debug key, and loads music from MediaStore by default
+        // since its settings can't be edited over adb.
+        benchmark {
+            initWith release
+            applicationIdSuffix ".bench"
+            versionNameSuffix "-BENCH"
+            signingConfig signingConfigs.debug
+            matchingFallbacks = ["release"]
+            profileable true
+            buildConfigField "boolean", "DEFAULT_MEDIA_STORE", "true"
         }
 
         release {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+
+            buildConfigField "boolean", "DEFAULT_MEDIA_STORE", "false"
 
             dependenciesInfo {
                 includeInApk = false
