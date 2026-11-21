@@ -108,6 +108,7 @@ private constructor(
     private val usesMediaStore
         get() = musicSettings.locationMode == LocationMode.MEDIA_STORE
 
+    /** Called whenever the service is started or bound, e.g. when the app returns. */
     fun start() {
         when (musicRepository.indexingState) {
             is IndexingState.Completed -> checkForExternalChanges()
@@ -119,12 +120,10 @@ private constructor(
     }
 
     /**
-     * Called whenever the service is started or bound, e.g. when the app comes back to the
-     * foreground. Unless automatic reloading keeps it in
-     * the foreground, the service (and with it the MediaStore observer) stops while the app is in
-     * the background, so changes made then (e.g. syncing new music) would only show up after the
-     * app is restarted. Reload if MediaStore changed since the last load, and otherwise check that
-     * MediaStore isn't missing anything.
+     * Unless automatic reloading keeps it running, the service (and with it the MediaStore
+     * observer) is stopped while the app is in the background, so changes made then (e.g. syncing
+     * music) would go unnoticed. Reload if MediaStore changed since the last load, and otherwise
+     * fix up any entries it's stuck on.
      */
     private fun checkForExternalChanges() {
         if (!usesMediaStore) return

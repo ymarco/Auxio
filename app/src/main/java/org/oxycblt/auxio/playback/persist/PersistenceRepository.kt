@@ -98,23 +98,6 @@ constructor(
     }
 
     override suspend fun saveState(state: PlaybackStateManager.SavedState?): Boolean {
-        // Transform saved state into raw state, which can then be written to the database.
-        val playbackState =
-            state?.let {
-                PlaybackState(
-                    id = 0,
-                    index = it.index,
-                    positionMs = it.positionMs,
-                    repeatMode = it.repeatMode,
-                    songUid = it.songUid,
-                    parentUid = it.parent?.uid,
-                )
-            }
-        val heap =
-            state?.heap?.mapIndexed { i, song -> QueueHeapItem(i, requireNotNull(song).uid) }
-        val shuffledMapping =
-            state?.shuffledMapping?.mapIndexed { i, index -> QueueShuffledMappingItem(i, index) }
-
         return try {
             // Replace the previous state in one transaction, so that an interrupted save can't
             // leave the state wiped.
@@ -122,10 +105,27 @@ constructor(
                 playbackStateDao.nukeState()
                 queueDao.nukeHeap()
                 queueDao.nukeShuffledMapping()
-                if (playbackState != null) {
-                    playbackStateDao.insertState(playbackState)
-                    queueDao.insertHeap(requireNotNull(heap))
-                    queueDao.insertShuffledMapping(requireNotNull(shuffledMapping))
+                if (state != null) {
+                    playbackStateDao.insertState(
+                        PlaybackState(
+                            id = 0,
+                            index = state.index,
+                            positionMs = state.positionMs,
+                            repeatMode = state.repeatMode,
+                            songUid = state.songUid,
+                            parentUid = state.parent?.uid,
+                        )
+                    )
+                    queueDao.insertHeap(
+                        state.heap.mapIndexed { i, song ->
+                            QueueHeapItem(i, requireNotNull(song).uid)
+                        }
+                    )
+                    queueDao.insertShuffledMapping(
+                        state.shuffledMapping.mapIndexed { i, index ->
+                            QueueShuffledMappingItem(i, index)
+                        }
+                    )
                 }
             }
             L.d("Successfully wrote new state")

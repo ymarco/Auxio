@@ -104,13 +104,10 @@ class ExoPlaybackStateHolder(
     }
 
     fun release() {
-        // A deferred save may still be pending, e.g. if the queue changed right before the app
-        // was backgrounded and the service stopped. Write it now instead of losing it.
-        if (currentSaveJob?.isActive == true) {
-            currentSaveJob?.cancel()
-            if (sessionOngoing) {
-                runBlocking { persistenceRepository.saveState(playbackManager.toSavedState()) }
-            }
+        // Pending saves are cancelled below (e.g. a queue change right before the app was
+        // backgrounded and the service stopped), so write the final state now instead.
+        if (sessionOngoing) {
+            runBlocking { persistenceRepository.saveState(playbackManager.toSavedState()) }
         }
         saveJob.cancel()
         playbackManager.unregisterStateHolder(this)
@@ -531,15 +528,6 @@ class ExoPlaybackStateHolder(
             playbackManager.ack(this, StateAck.ProgressionChanged)
         }
 
-        if (
-            events.contains(Player.EVENT_POSITION_DISCONTINUITY) &&
-                !events.contains(Player.EVENT_IS_PLAYING_CHANGED) &&
-                !player.isPlaying
-        ) {
-            // Seeked while paused, keep the persisted position in sync.
-            savePosition()
-        }
-
         if (events.contains(Player.EVENT_IS_PLAYING_CHANGED)) {
             // Keep the persisted position fresh, so that it survives the process being killed
             // (e.g. swiping the app away, or the system reclaiming memory) mid-song.
@@ -554,6 +542,18 @@ class ExoPlaybackStateHolder(
                         }
                     }
             }
+        }
+    }
+
+    override fun onPositionDiscontinuity(
+        oldPosition: Player.PositionInfo,
+        newPosition: Player.PositionInfo,
+        reason: Int,
+    ) {
+        super.onPositionDiscontinuity(oldPosition, newPosition, reason)
+        // Positions are only saved periodically while playing, so save seeks made while paused.
+        if (reason == Player.DISCONTINUITY_REASON_SEEK && !player.isPlaying) {
+            savePosition()
         }
     }
 

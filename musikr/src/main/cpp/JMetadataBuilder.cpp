@@ -221,13 +221,11 @@ jobject JMetadataBuilder::build() {
         cover.reset();
         coverTooLarge = JNI_TRUE;
     }
+    std::optional<JByteArrayRef> jCoverArray;
     if (cover.has_value()) {
-        JByteArrayRef jCoverArray { env, cover.value() };
-        jobject result = env->NewObject(*jMetadataClass, jMetadataInitMethod,
-                **jId3v2Map, **jXiphMap, **jMp4Map, *jCoverArray, *jProperties,
-                coverTooLarge);
-        return result;
+        jCoverArray.emplace(env, cover.value());
     }
     return env->NewObject(*jMetadataClass, jMetadataInitMethod, **jId3v2Map,
-            **jXiphMap, **jMp4Map, nullptr, *jProperties, coverTooLarge);
+            **jXiphMap, **jMp4Map, jCoverArray ? **jCoverArray : nullptr,
+            *jProperties, coverTooLarge);
 }
