@@ -280,7 +280,7 @@ static jobject failedResult(JNIEnv *env) {
 extern "C" JNIEXPORT jobject JNICALL
 Java_org_oxycblt_musikr_metadata_TagLibJNI_openNative(JNIEnv *env,
         jobject /* this */,
-        jobject inputStream) {
+        jobject inputStream, jint maxCoverBytes) {
     std::string name = "unknown file";
     TagLib::File *overriddenFile = nullptr;
     try {
@@ -315,7 +315,8 @@ Java_org_oxycblt_musikr_metadata_TagLibJNI_openNative(JNIEnv *env,
             delete overriddenFile;
             return metadataResultNoMetadata(env);
         }
-        JMetadataBuilder jBuilder {env};
+        JMetadataBuilder jBuilder {env,
+                static_cast<unsigned int>(maxCoverBytes)};
         jBuilder.setProperties(fileToUse->audioProperties());
 
         if (!dispatchAndParse(name, fileToUse, jBuilder)) {

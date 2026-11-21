@@ -26,11 +26,24 @@ import kotlinx.coroutines.withContext
 import org.oxycblt.musikr.fs.File
 
 internal interface MetadataExtractor {
-    suspend fun extract(deviceFile: File): MetadataResult
+    /**
+     * Extract the metadata of [deviceFile]. Embedded covers larger than [maxCoverBytes] are not
+     * loaded, and are instead flagged with [Metadata.coverTooLarge].
+     */
+    suspend fun extract(
+        deviceFile: File,
+        maxCoverBytes: Int = DEFAULT_MAX_COVER_BYTES,
+    ): MetadataResult
 
     companion object {
         fun from(context: Context): MetadataExtractor =
             MetadataExtractorImpl(context.contentResolver)
+
+        /** Cover size limit when many files are extracted in parallel. */
+        const val DEFAULT_MAX_COVER_BYTES = 16 * 1024 * 1024
+
+        /** Cover size limit when a file is extracted on its own. */
+        const val LARGE_MAX_COVER_BYTES = 64 * 1024 * 1024
     }
 }
 
@@ -46,11 +59,11 @@ sealed interface MetadataResult {
 
 private class MetadataExtractorImpl(private val contentResolver: ContentResolver) :
     MetadataExtractor {
-    override suspend fun extract(deviceFile: File): MetadataResult =
+    override suspend fun extract(deviceFile: File, maxCoverBytes: Int): MetadataResult =
         withContext(Dispatchers.IO) {
             contentResolver.openFileDescriptor(deviceFile.uri, "r")?.use { fd ->
                 val fis = FileInputStream(fd.fileDescriptor)
-                TagLibJNI.open(deviceFile, fis).also { fis.close() }
+                TagLibJNI.open(deviceFile, fis, maxCoverBytes).also { fis.close() }
             } ?: MetadataResult.ProviderFailed
         }
 }

@@ -32,8 +32,9 @@
 #include "JByteArrayRef.h"
 #include "util.h"
 
-JMetadataBuilder::JMetadataBuilder(JNIEnv *env) : env(env), id3v2(env), xiph(
-        env), mp4(env), cover(), properties(nullptr) {
+JMetadataBuilder::JMetadataBuilder(JNIEnv *env, unsigned int maxCoverBytes) : env(
+        env), id3v2(env), xiph(env), mp4(env), cover(), maxCoverBytes(
+        maxCoverBytes), properties(nullptr) {
 }
 
 void JMetadataBuilder::setMimeType(TagLib::String type) {
@@ -205,23 +206,28 @@ jobject JMetadataBuilder::build() {
     JClassRef jMetadataClass { env, "org/oxycblt/musikr/metadata/Metadata" };
     jmethodID jMetadataInitMethod = jMetadataClass.method("<init>",
             "(Ljava/util/Map;Ljava/util/Map;Ljava/util/Map;[BLorg/"
-                    "oxycblt/musikr/metadata/Properties;)V");
+                    "oxycblt/musikr/metadata/Properties;Z)V");
     auto jId3v2Map = id3v2.getObject();
     auto jXiphMap = xiph.getObject();
     auto jMp4Map = mp4.getObject();
-    if (cover.has_value() && cover->size() > MAX_COVER_BYTES) {
-        // Some files embed absurdly large covers (e.g 150MB print-resolution scans).
-        // Copying them onto the JVM heap will OOM the app, especially since files
-        // are extracted in parallel. Drop them, other cover sources can still apply.
-        LOGE("Ignoring oversized embedded cover (%u bytes)", cover->size());
+    // Some files embed very large covers (e.g 20-150MB print-resolution scans).
+    // Copying them onto the JVM heap while files are extracted in parallel will
+    // OOM the app, so drop them here and tell the caller, which can retry the file
+    // with a larger limit while nothing else is in flight.
+    jboolean coverTooLarge = JNI_FALSE;
+    if (cover.has_value() && cover->size() > maxCoverBytes) {
+        LOGD("Skipping embedded cover over limit (%u > %u bytes)", cover->size(),
+                maxCoverBytes);
         cover.reset();
+        coverTooLarge = JNI_TRUE;
     }
     if (cover.has_value()) {
         JByteArrayRef jCoverArray { env, cover.value() };
         jobject result = env->NewObject(*jMetadataClass, jMetadataInitMethod,
-                **jId3v2Map, **jXiphMap, **jMp4Map, *jCoverArray, *jProperties);
+                **jId3v2Map, **jXiphMap, **jMp4Map, *jCoverArray, *jProperties,
+                coverTooLarge);
         return result;
     }
     return env->NewObject(*jMetadataClass, jMetadataInitMethod, **jId3v2Map,
-            **jXiphMap, **jMp4Map, nullptr, *jProperties);
+            **jXiphMap, **jMp4Map, nullptr, *jProperties, coverTooLarge);
 }

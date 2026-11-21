@@ -19,10 +19,13 @@
 package org.oxycblt.musikr.pipeline
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.oxycblt.musikr.Config
 import org.oxycblt.musikr.cache.Audio
 import org.oxycblt.musikr.cache.CachedFile
@@ -77,8 +80,13 @@ private class ExtractStepImpl(
                     is NewSong -> {
                         when (val result = metadataExtractor.extract(item.file)) {
                             is MetadataResult.Success ->
-                                result.metadata?.let { metadata -> NeedsParsing(item, metadata) }
-                                    ?: Finalized(InvalidSong)
+                                result.metadata?.let { metadata ->
+                                    if (metadata.coverTooLarge) {
+                                        extractLargeCover(item, metadata)
+                                    } else {
+                                        NeedsParsing(item, metadata)
+                                    }
+                                } ?: Finalized(InvalidSong)
                             MetadataResult.NoMetadata -> Finalized(InvalidSong)
                             MetadataResult.NotAudio -> Finalized(NotAudio)
                             MetadataResult.ProviderFailed -> Finalized(InvalidSong)
@@ -95,9 +103,10 @@ private class ExtractStepImpl(
                     is NeedsParsing -> {
                         val tags = tagParser.parse(item.metadata)
                         val cover =
-                            when (val result = covers.create(item.newSong.file, item.metadata)) {
-                                is CoverResult.Hit -> result.cover
-                                else -> null
+                            if (item.largeCover != null) {
+                                item.largeCover.cover
+                            } else {
+                                createCover(item.newSong, item.metadata)
                             }
                         NeedsCaching(
                             RawSong(
@@ -150,10 +159,49 @@ private class ExtractStepImpl(
         return scope.merge(extractTask, parsedTask, finalizedTask)
     }
 
+    private suspend fun createCover(newSong: NewSong, metadata: Metadata): Cover? =
+        when (val result = covers.create(newSong.file, metadata)) {
+            is CoverResult.Hit -> result.cover
+            else -> null
+        }
+
+    /**
+     * The file has an embedded cover too large to load while many files are being extracted in
+     * parallel. Re-extract it with a larger limit while holding [largeCoverLock], and turn the
+     * cover into a [Cover] before releasing it, so that at most one large cover is in memory at
+     * once. Falls back to the original metadata (without the embedded cover) on any failure.
+     */
+    private suspend fun extractLargeCover(newSong: NewSong, metadata: Metadata): NeedsParsing =
+        largeCoverLock.withLock {
+            val large =
+                (metadataExtractor.extract(
+                        newSong.file,
+                        MetadataExtractor.LARGE_MAX_COVER_BYTES,
+                    ) as? MetadataResult.Success)
+                    ?.metadata
+            val cover =
+                try {
+                    large?.takeIf { it.cover != null }?.let { createCover(newSong, it) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                } catch (e: OutOfMemoryError) {
+                    null
+                }
+            NeedsParsing(newSong, metadata, LargeCover(cover))
+        }
+
     private sealed interface ParsedExtractItem
 
-    private data class NeedsParsing(val newSong: NewSong, val metadata: Metadata) :
-        ParsedExtractItem
+    /** A cover that was resolved ahead of time, see [extractLargeCover]. */
+    private class LargeCover(val cover: Cover?)
+
+    private data class NeedsParsing(
+        val newSong: NewSong,
+        val metadata: Metadata,
+        val largeCover: LargeCover? = null,
+    ) : ParsedExtractItem
 
     private sealed interface ParsedCachingItem
 
@@ -163,6 +211,8 @@ private class ExtractStepImpl(
 
     private fun RawSong.toCachedFile() =
         CachedFile(file, audio = Audio(properties, tags, cover?.id), addedMs)
+
+    private val largeCoverLock = Mutex()
 
     private companion object {
         const val PARALLELISM = 8

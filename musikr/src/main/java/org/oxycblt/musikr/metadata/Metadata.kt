@@ -24,6 +24,11 @@ data class Metadata(
     val mp4: Map<String, List<String>>,
     val cover: ByteArray?,
     val properties: Properties,
+    /**
+     * Whether an embedded cover exists but was larger than the requested limit, and so was not
+     * loaded into [cover].
+     */
+    val coverTooLarge: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -39,6 +44,7 @@ data class Metadata(
             if (!cover.contentEquals(other.cover)) return false
         } else if (other.cover != null) return false
         if (properties != other.properties) return false
+        if (coverTooLarge != other.coverTooLarge) return false
 
         return true
     }
@@ -49,6 +55,7 @@ data class Metadata(
         result = 31 * result + mp4.hashCode()
         result = 31 * result + (cover?.contentHashCode() ?: 0)
         result = 31 * result + properties.hashCode()
+        result = 31 * result + coverTooLarge.hashCode()
         return result
     }
 }

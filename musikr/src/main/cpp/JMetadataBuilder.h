@@ -31,12 +31,9 @@
 
 #include "JTagMap.h"
 
-// Embedded covers larger than this are ignored to avoid OOMing the JVM heap.
-constexpr unsigned int MAX_COVER_BYTES = 16 * 1024 * 1024;
-
 class JMetadataBuilder {
 public:
-    JMetadataBuilder(JNIEnv *env);
+    JMetadataBuilder(JNIEnv *env, unsigned int maxCoverBytes);
 
     void setMimeType(TagLib::String type);
     void setId3v1(TagLib::ID3v1::Tag &tag);
@@ -54,6 +51,8 @@ private:
     TagLib::String mimeType;
 
     std::optional<TagLib::ByteVector> cover;
+    // Covers larger than this are not copied onto the JVM heap.
+    unsigned int maxCoverBytes;
     TagLib::AudioProperties *properties;
 
     JTagMap id3v2;
