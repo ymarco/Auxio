@@ -19,6 +19,7 @@
 package org.oxycblt.musikr
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
@@ -113,11 +114,14 @@ private class MusikrImpl(
     private val evaluateStep: EvaluateStep,
 ) : Musikr {
     override suspend fun run(onProgress: suspend (IndexingProgress) -> Unit) = coroutineScope {
+        val startNs = System.nanoTime()
+        fun elapsedMs() = (System.nanoTime() - startNs) / 1_000_000
         onProgress(IndexingProgress.Songs(0, 0))
         var explored = 0
         var loaded = 0
         val exploredChannel = Channel<Explored>(Channel.UNLIMITED)
         val exploredTask = exploreStep.explore(this, exploredChannel)
+        exploredTask.invokeOnCompletion { Log.d(TAG, "Explore finished at ${elapsedMs()}ms") }
         val trackedExploredChannel = Channel<Explored>(Channel.UNLIMITED)
         val trackedExploredTask =
             tryAsyncWith(trackedExploredChannel, Dispatchers.Main) {
@@ -129,6 +133,7 @@ private class MusikrImpl(
             }
         val extractedChannel = Channel<Extracted>(Channel.UNLIMITED)
         val extractedTask = extractStep.extract(this, trackedExploredChannel, extractedChannel)
+        extractedTask.invokeOnCompletion { Log.d(TAG, "Extract finished at ${elapsedMs()}ms") }
         val trackedExtractedChannel = Channel<Extracted>(Channel.UNLIMITED)
         val trackedExtractedTask =
             tryAsyncWith(trackedExtractedChannel, Dispatchers.Main) {
@@ -140,10 +145,13 @@ private class MusikrImpl(
                 onProgress(IndexingProgress.Indeterminate)
             }
         val library = evaluateStep.evaluate(trackedExtractedChannel)
+        Log.d(TAG, "Evaluate finished at ${elapsedMs()}ms ($loaded/$explored loaded)")
         merge(exploredTask, extractedTask, trackedExploredTask, trackedExtractedTask).await()
         LibraryResultImpl(config, library)
     }
 }
+
+private const val TAG = "Musikr"
 
 private class LibraryResultImpl(private val config: Config, override val library: MutableLibrary) :
     LibraryResult {
